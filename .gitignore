@@ -1,0 +1,41 @@
+# =========================
+# 前端部分 (Node.js & Vue)
+# =========================
+# 依赖包（绝不能传！）
+node_modules/
+# 打包编译后的产物
+dist/
+dist-ssr/
+# 本地环境变量配置（包含密码或 API Key 等隐私）
+.env.local
+.env.*.local
+# npm 运行时的错误日志
+npm-debug.log*
+yarn-error.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# =========================
+# 后端部分 (Python & FastAPI)
+# =========================
+# Python 编译的缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+# Python 虚拟环境（包含几万个 Python 依赖库）
+venv/
+env/
+.venv/
+# 后端的敏感环境变量
+.env
+
+# =========================
+# 操作系统与开发工具 (Cursor/VSCode等)
+# =========================
+# Mac 系统产生的垃圾文件
+.DS_Store
+# Windows 系统产生的垃圾文件
+Thumbs.db
+# 编辑器的本地配置（每个人电脑配置不同，不要同步）
+.vscode/
+.idea/
