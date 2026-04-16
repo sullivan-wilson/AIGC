@@ -6,6 +6,7 @@ const drawingCanvas = ref(null)
 const fileInputRef = ref(null)
 const brushColor = ref('#ef4444')
 const brushWidth = ref(4)
+const promptText = ref('')
 const originalImageBase64 = ref('')
 let fabricCanvas = null
 const CANVAS_SIZE = 600
@@ -177,9 +178,38 @@ async function exportInpaintingData() {
     return
   }
 
-  const maskImageBase64 = await buildMaskImageBase64()
-  console.log('original_image:', originalImageBase64.value)
-  console.log('mask_image:', maskImageBase64)
+  try {
+    const maskImageBase64 = await buildMaskImageBase64()
+
+    // 保留原有调试输出，便于前端快速确认导出内容是否正确
+    console.log('original_image:', originalImageBase64.value)
+    console.log('mask_image:', maskImageBase64)
+
+    // 在控制台额外输出 prompt，方便联调时排查文本字段传输问题
+    console.log('prompt:', promptText.value)
+
+    const response = await fetch('http://127.0.0.1:8000/api/redraw', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        prompt: promptText.value,
+        original_image: originalImageBase64.value,
+        mask_image: maskImageBase64
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`请求失败，状态码: ${response.status}`)
+    }
+
+    const data = await response.json()
+    alert(data.message || '请求已发送，但后端未返回 message 字段')
+  } catch (error) {
+    console.error('发送重绘数据失败：', error)
+    alert('发送重绘数据失败，请检查后端服务是否已启动。')
+  }
 }
 
 onUnmounted(() => {
@@ -231,6 +261,16 @@ onUnmounted(() => {
         />
         <span class="w-8 text-right">{{ brushWidth }}</span>
       </label>
+    </div>
+
+    <div class="mb-4 w-[600px] rounded bg-white px-4 py-3 shadow">
+      <label class="mb-2 block text-sm text-slate-700">重绘提示词（Prompt）</label>
+      <input
+        v-model="promptText"
+        type="text"
+        placeholder="例如：把被涂抹区域改成绿色草地"
+        class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
+      />
     </div>
 
     <canvas
