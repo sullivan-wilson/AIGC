@@ -1,35 +1,98 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
-import { Canvas, FabricImage, PencilBrush, StaticCanvas } from 'fabric'
+import { Canvas, FabricImage, Rect, StaticCanvas } from 'fabric'
 
 const drawingCanvas = ref(null)
 const fileInputRef = ref(null)
-const brushColor = ref('#ef4444')
-const brushWidth = ref(4)
 const promptText = ref('')
-const originalImageBase64 = ref('')
+const negativePromptText = ref('green grass, vegetation, meadow, forest')
 const resultImageBase64 = ref('')
 const isGenerating = ref(false)
 let fabricCanvas = null
 const CANVAS_SIZE = 600
+const RECT_PREVIEW_OPACITY = 0.5
+
+let isMouseDown = false
+let startX = 0
+let startY = 0
+let activeRect = null
+
+function bindRectangleDrawingEvents() {
+  if (!fabricCanvas) {
+    return
+  }
+
+  // 鼠标按下时创建一个半透明矩形，作为实时框选预览
+  fabricCanvas.on('mouse:down', (event) => {
+    const pointer = fabricCanvas.getPointer(event.e)
+    isMouseDown = true
+    startX = pointer.x
+    startY = pointer.y
+
+    activeRect = new Rect({
+      left: startX,
+      top: startY,
+      width: 0,
+      height: 0,
+      fill: 'red',
+      opacity: RECT_PREVIEW_OPACITY,
+      selectable: false,
+      evented: false
+    })
+    fabricCanvas.add(activeRect)
+  })
+
+  // 鼠标拖拽时更新矩形的左上角与宽高，支持任意方向拖拽
+  fabricCanvas.on('mouse:move', (event) => {
+    if (!isMouseDown || !activeRect) {
+      return
+    }
+
+    const pointer = fabricCanvas.getPointer(event.e)
+    const left = Math.min(startX, pointer.x)
+    const top = Math.min(startY, pointer.y)
+    const width = Math.abs(pointer.x - startX)
+    const height = Math.abs(pointer.y - startY)
+
+    activeRect.set({
+      left,
+      top,
+      width,
+      height
+    })
+    activeRect.setCoords()
+    fabricCanvas.renderAll()
+  })
+
+  // 鼠标松开后结束当前框选；过小的误触矩形会被自动删除
+  fabricCanvas.on('mouse:up', () => {
+    isMouseDown = false
+    if (activeRect) {
+      const isTooSmall = activeRect.width < 2 || activeRect.height < 2
+      if (isTooSmall) {
+        fabricCanvas.remove(activeRect)
+      }
+    }
+    activeRect = null
+    fabricCanvas.renderAll()
+  })
+}
 
 onMounted(() => {
   // 初始化 Fabric 画布，并限制在 600x600 的固定尺寸
   fabricCanvas = new Canvas(drawingCanvas.value, {
     width: CANVAS_SIZE,
     height: CANVAS_SIZE,
-    isDrawingMode: true
+    isDrawingMode: false,
+    selection: false
   })
 
   // 设置浅灰色背景，满足画板底色要求
   fabricCanvas.backgroundColor = '#e5e7eb'
   fabricCanvas.renderAll()
 
-  // 配置自由画笔：将颜色和粗细都绑定到响应式变量，便于后续通过 UI 实时调节
-  const brush = new PencilBrush(fabricCanvas)
-  brush.color = brushColor.value
-  brush.width = brushWidth.value
-  fabricCanvas.freeDrawingBrush = brush
+  // 绑定矩形框选交互：替代原来的自由画笔涂抹模式
+  bindRectangleDrawingEvents()
 })
 
 function openUploadDialog() {
@@ -61,9 +124,8 @@ async function handleImageUpload(event) {
   }
 
   try {
-    // 保留原图 Base64，用于后续点击“获取重绘数据”时直接输出 original_image
+    // 读取上传图片，用于设置为画布背景图（后续 original_image 会从画布坐标系导出）
     const dataUrl = await readFileAsDataURL(file)
-    originalImageBase64.value = dataUrl
 
     // 使用原生 Image 获取真实宽高，再交给 FabricImage，便于精确计算缩放比例
     const imageElement = await loadImageElement(dataUrl)
@@ -97,24 +159,6 @@ async function handleImageUpload(event) {
   }
 }
 
-function updateBrushColor() {
-  if (!fabricCanvas?.freeDrawingBrush) {
-    return
-  }
-
-  // 每次颜色选择器变化时，都同步更新 Fabric 当前画笔颜色
-  fabricCanvas.freeDrawingBrush.color = brushColor.value
-}
-
-function updateBrushWidth() {
-  if (!fabricCanvas?.freeDrawingBrush) {
-    return
-  }
-
-  // 每次滑动条变化时，都同步更新 Fabric 当前画笔粗细
-  fabricCanvas.freeDrawingBrush.width = Number(brushWidth.value)
-}
-
 function clearCanvas() {
   if (!fabricCanvas) {
     return
@@ -123,10 +167,7 @@ function clearCanvas() {
   // 仅移除笔迹对象，保留背景色和绘图模式配置
   fabricCanvas.clear()
   fabricCanvas.backgroundColor = '#e5e7eb'
-  fabricCanvas.isDrawingMode = true
-  // 清空后再次确保画笔参数与当前 UI 状态一致，避免出现样式不同步
-  updateBrushColor()
-  updateBrushWidth()
+  fabricCanvas.isDrawingMode = false
   fabricCanvas.renderAll()
 }
 
@@ -160,7 +201,7 @@ async function buildMaskImageBase64() {
       const clonedObject = await object.clone()
       clonedObject.set({
         fill: '#ffffff',
-        stroke: '#ffffff',
+        stroke: null,
         opacity: 1,
         shadow: null
       })
@@ -175,6 +216,30 @@ async function buildMaskImageBase64() {
   }
 }
 
+async function buildOriginalImageBase64() {
+  if (!fabricCanvas) {
+    return ''
+  }
+
+  // original_image 从与遮罩同尺寸同坐标系的离屏画布导出，避免原图/遮罩错位
+  const originalCanvas = new StaticCanvas(null, {
+    width: CANVAS_SIZE,
+    height: CANVAS_SIZE,
+    backgroundColor: fabricCanvas.backgroundColor || '#e5e7eb'
+  })
+
+  try {
+    if (fabricCanvas.backgroundImage) {
+      const clonedBackground = await fabricCanvas.backgroundImage.clone()
+      originalCanvas.backgroundImage = clonedBackground
+    }
+    originalCanvas.renderAll()
+    return originalCanvas.toDataURL({ format: 'png' })
+  } finally {
+    originalCanvas.dispose()
+  }
+}
+
 async function exportInpaintingData() {
   if (!fabricCanvas || isGenerating.value) {
     return
@@ -182,14 +247,38 @@ async function exportInpaintingData() {
 
   try {
     isGenerating.value = true
-    const maskImageBase64 = await buildMaskImageBase64()
+    const originalImageBase64 = await buildOriginalImageBase64()
+    if (!originalImageBase64) {
+      throw new Error('无法导出原图，请先上传底图。')
+    }
+
+    // 导出遮罩前临时把所有矩形设为不透明，导出后再恢复半透明预览
+    const opacityBackup = []
+    const objects = fabricCanvas.getObjects()
+    objects.forEach((object) => {
+      opacityBackup.push({ object, opacity: object.opacity })
+      object.set({ opacity: 1 })
+    })
+    fabricCanvas.renderAll()
+
+    let maskImageBase64 = ''
+    try {
+      maskImageBase64 = await buildMaskImageBase64()
+    } finally {
+      // 无论导出成功或失败，都恢复用户可见预览为半透明
+      opacityBackup.forEach(({ object, opacity }) => {
+        object.set({ opacity })
+      })
+      fabricCanvas.renderAll()
+    }
 
     // 保留原有调试输出，便于前端快速确认导出内容是否正确
-    console.log('original_image:', originalImageBase64.value)
+    console.log('original_image:', originalImageBase64)
     console.log('mask_image:', maskImageBase64)
 
     // 在控制台额外输出 prompt，方便联调时排查文本字段传输问题
     console.log('prompt:', promptText.value)
+    console.log('negative_prompt:', negativePromptText.value)
 
     const response = await fetch('http://127.0.0.1:8000/api/redraw', {
       method: 'POST',
@@ -198,7 +287,8 @@ async function exportInpaintingData() {
       },
       body: JSON.stringify({
         prompt: promptText.value,
-        original_image: originalImageBase64.value,
+        negative_prompt: negativePromptText.value,
+        original_image: originalImageBase64,
         mask_image: maskImageBase64
       })
     })
@@ -251,29 +341,7 @@ onUnmounted(() => {
           >
             上传底图
           </button>
-
-          <label class="flex items-center gap-2 text-sm text-slate-700">
-            画笔颜色
-            <input
-              v-model="brushColor"
-              type="color"
-              class="h-8 w-10 cursor-pointer rounded border border-slate-300 bg-white p-0"
-              @input="updateBrushColor"
-            />
-          </label>
-
-          <label class="flex items-center gap-2 text-sm text-slate-700">
-            画笔粗细
-            <input
-              v-model="brushWidth"
-              type="range"
-              min="1"
-              max="30"
-              class="w-40 cursor-pointer"
-              @input="updateBrushWidth"
-            />
-            <span class="w-8 text-right">{{ brushWidth }}</span>
-          </label>
+          <span class="text-sm text-slate-600">交互模式：拖拽绘制半透明矩形选区</span>
         </div>
 
         <div class="mb-4 rounded bg-slate-50 px-4 py-3">
@@ -282,6 +350,14 @@ onUnmounted(() => {
             v-model="promptText"
             type="text"
             placeholder="例如：把被涂抹区域改成绿色草地"
+            class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
+          />
+
+          <label class="mb-2 mt-3 block text-sm text-slate-700">反向提示词（Negative Prompt）</label>
+          <input
+            v-model="negativePromptText"
+            type="text"
+            placeholder="例如：green grass, vegetation, meadow, forest"
             class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
           />
         </div>

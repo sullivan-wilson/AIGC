@@ -3,15 +3,17 @@ import io
 from contextlib import asynccontextmanager
 
 import torch
-from diffusers import StableDiffusionInpaintPipeline
+from diffusers import StableDiffusionXLInpaintPipeline
+from deep_translator import GoogleTranslator
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
-from PIL import Image
+from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 
 class RedrawRequest(BaseModel):
     prompt: str
+    negative_prompt: str = ""
     original_image: str
     mask_image: str
 
@@ -46,6 +48,42 @@ def pil_to_base64(pil_image: Image.Image) -> str:
         raise ValueError(f"图片转 Base64 失败: {str(exc)}") from exc
 
 
+def resize_with_padding(
+    image: Image.Image,
+    target_size: int,
+    mode: str,
+    background_color,
+    resample,
+) -> Image.Image:
+    """
+    以“同比例缩放 + 居中填充”的方式适配到目标分辨率，避免直接 resize 造成形变。
+    """
+    converted = image.convert(mode)
+    contained = ImageOps.contain(converted, (target_size, target_size), method=resample)
+    canvas = Image.new(mode, (target_size, target_size), background_color)
+    paste_x = (target_size - contained.width) // 2
+    paste_y = (target_size - contained.height) // 2
+    canvas.paste(contained, (paste_x, paste_y))
+    return canvas
+
+
+def translate_to_english(text: str) -> str:
+    """
+    将任意语言文本翻译为英文，供文生图模型使用。
+    若文本为空，直接返回空字符串；若翻译失败，抛出明确异常。
+    """
+    try:
+        if not text or not text.strip():
+            return ""
+        translator = GoogleTranslator(source="auto", target="en")
+        translated_text = translator.translate(text)
+        if not translated_text or not translated_text.strip():
+            raise ValueError("翻译结果为空")
+        return translated_text
+    except Exception as exc:
+        raise ValueError(f"提示词翻译失败: {str(exc)}") from exc
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -53,15 +91,17 @@ async def lifespan(app: FastAPI):
     优先使用 CUDA + float16，提高推理速度并降低显存占用。
     """
     try:
-        model_id = "runwayml/stable-diffusion-inpainting"
+        model_id = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
         if not torch.cuda.is_available():
             raise RuntimeError("未检测到可用 CUDA GPU，当前仅配置了 GPU 推理。")
 
-        app.state.pipe = StableDiffusionInpaintPipeline.from_pretrained(
+        app.state.pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
             model_id,
             torch_dtype=torch.float16,
+            variant="fp16",
         )
-        app.state.pipe = app.state.pipe.to("cuda")
+        # SDXL 必须启用 CPU Offload，避免高分辨率推理时显存溢出
+        app.state.pipe.enable_model_cpu_offload()
         # 启用注意力切片，进一步降低显存峰值，减少 OOM 概率
         app.state.pipe.enable_attention_slicing()
         app.state.pipe_error = None
@@ -109,21 +149,46 @@ async def redraw(payload: RedrawRequest):
         if not payload.prompt.strip():
             raise HTTPException(status_code=400, detail="prompt 不能为空。")
 
+        # 0) 将正向/反向提示词翻译为英文，提升模型对中文输入的兼容性
+        english_prompt = translate_to_english(payload.prompt)
+        english_negative_prompt = translate_to_english(payload.negative_prompt)
+        print(f"prompt(原文): {payload.prompt}")
+        print(f"prompt(英文): {english_prompt}")
+        if payload.negative_prompt.strip():
+            print(f"negative_prompt(原文): {payload.negative_prompt}")
+            print(f"negative_prompt(英文): {english_negative_prompt}")
+
         # 1) 将前端 Base64 数据解码为 PIL 图像
         original_image = base64_to_pil(payload.original_image)
         mask_image = base64_to_pil(payload.mask_image)
 
-        # 2) 统一尺寸到模型推荐输入（512x512），避免尺寸不匹配导致推理报错
-        original_image = original_image.resize((512, 512))
-        # mask 要求黑白语义明显，转为 L 模式后再送入模型更稳妥
-        mask_image = mask_image.convert("L").resize((512, 512))
+        # 2) 使用同比例缩放+填充适配到 SDXL 输入，避免图像被强行拉伸
+        original_image = resize_with_padding(
+            image=original_image,
+            target_size=1024,
+            mode="RGB",
+            background_color=(0, 0, 0),
+            resample=Image.Resampling.LANCZOS,
+        )
+        # mask 使用最近邻缩放避免边缘灰阶插值，并保持黑底语义
+        mask_image = resize_with_padding(
+            image=mask_image,
+            target_size=1024,
+            mode="L",
+            background_color=0,
+            resample=Image.Resampling.NEAREST,
+        )
+        # 将 mask 强制二值化为 0/255 的硬边遮罩，提升局部重绘确定性
+        mask_image = mask_image.point(lambda p: 255 if p > 127 else 0)
 
         # 3) 调用 Stable Diffusion Inpainting 进行局部重绘
         result = app.state.pipe(
-            prompt=payload.prompt,
+            prompt=english_prompt,
+            negative_prompt=english_negative_prompt,
             image=original_image,
             mask_image=mask_image,
-            num_inference_steps=30,
+            strength=0.95,
+            num_inference_steps=35,
             guidance_scale=7.5,
         )
         result_image = result.images[0]
