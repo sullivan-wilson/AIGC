@@ -8,6 +8,8 @@ const brushColor = ref('#ef4444')
 const brushWidth = ref(4)
 const promptText = ref('')
 const originalImageBase64 = ref('')
+const resultImageBase64 = ref('')
+const isGenerating = ref(false)
 let fabricCanvas = null
 const CANVAS_SIZE = 600
 
@@ -174,11 +176,12 @@ async function buildMaskImageBase64() {
 }
 
 async function exportInpaintingData() {
-  if (!fabricCanvas) {
+  if (!fabricCanvas || isGenerating.value) {
     return
   }
 
   try {
+    isGenerating.value = true
     const maskImageBase64 = await buildMaskImageBase64()
 
     // 保留原有调试输出，便于前端快速确认导出内容是否正确
@@ -205,10 +208,16 @@ async function exportInpaintingData() {
     }
 
     const data = await response.json()
-    alert(data.message || '请求已发送，但后端未返回 message 字段')
+    // 后端成功返回 result_image 后，直接用于页面展示
+    if (!data?.result_image) {
+      throw new Error('后端返回成功，但缺少 result_image 字段')
+    }
+    resultImageBase64.value = data.result_image
   } catch (error) {
     console.error('发送重绘数据失败：', error)
-    alert('发送重绘数据失败，请检查后端服务是否已启动。')
+    alert('重绘失败，请检查网络连接或后端服务状态后重试。')
+  } finally {
+    isGenerating.value = false
   }
 }
 
@@ -222,81 +231,113 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="flex min-h-screen flex-col items-center justify-center bg-slate-100 p-4">
-    <div class="mb-4 flex items-center gap-4 rounded bg-white px-4 py-3 shadow">
-      <input
-        ref="fileInputRef"
-        type="file"
-        accept="image/*"
-        class="hidden"
-        @change="handleImageUpload"
-      />
+  <main class="min-h-screen bg-slate-100 p-4">
+    <div class="mx-auto grid max-w-[1320px] gap-4 lg:grid-cols-[720px_1fr]">
+      <section class="rounded bg-white p-4 shadow">
+        <h1 class="mb-4 text-lg font-semibold text-slate-800">AIGC 局部重绘工作台</h1>
 
-      <button
-        class="rounded bg-sky-500 px-4 py-2 text-white transition hover:bg-sky-600"
-        @click="openUploadDialog"
-      >
-        上传底图
-      </button>
+        <div class="mb-4 flex flex-wrap items-center gap-4 rounded bg-slate-50 px-4 py-3">
+          <input
+            ref="fileInputRef"
+            type="file"
+            accept="image/*"
+            class="hidden"
+            @change="handleImageUpload"
+          />
 
-      <label class="flex items-center gap-2 text-sm text-slate-700">
-        画笔颜色
-        <input
-          v-model="brushColor"
-          type="color"
-          class="h-8 w-10 cursor-pointer rounded border border-slate-300 bg-white p-0"
-          @input="updateBrushColor"
-        />
-      </label>
+          <button
+            class="rounded bg-sky-500 px-4 py-2 text-white transition hover:bg-sky-600"
+            @click="openUploadDialog"
+          >
+            上传底图
+          </button>
 
-      <label class="flex items-center gap-2 text-sm text-slate-700">
-        画笔粗细
-        <input
-          v-model="brushWidth"
-          type="range"
-          min="1"
-          max="30"
-          class="w-40 cursor-pointer"
-          @input="updateBrushWidth"
-        />
-        <span class="w-8 text-right">{{ brushWidth }}</span>
-      </label>
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            画笔颜色
+            <input
+              v-model="brushColor"
+              type="color"
+              class="h-8 w-10 cursor-pointer rounded border border-slate-300 bg-white p-0"
+              @input="updateBrushColor"
+            />
+          </label>
+
+          <label class="flex items-center gap-2 text-sm text-slate-700">
+            画笔粗细
+            <input
+              v-model="brushWidth"
+              type="range"
+              min="1"
+              max="30"
+              class="w-40 cursor-pointer"
+              @input="updateBrushWidth"
+            />
+            <span class="w-8 text-right">{{ brushWidth }}</span>
+          </label>
+        </div>
+
+        <div class="mb-4 rounded bg-slate-50 px-4 py-3">
+          <label class="mb-2 block text-sm text-slate-700">重绘提示词（Prompt）</label>
+          <input
+            v-model="promptText"
+            type="text"
+            placeholder="例如：把被涂抹区域改成绿色草地"
+            class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
+          />
+        </div>
+
+        <div class="flex justify-center">
+          <canvas
+            ref="drawingCanvas"
+            class="rounded border border-slate-300 shadow"
+          />
+        </div>
+
+        <div class="mt-4 flex flex-wrap justify-center gap-3">
+          <button
+            class="rounded bg-red-500 px-4 py-2 text-white transition hover:bg-red-600"
+            @click="clearCanvas"
+          >
+            清空
+          </button>
+
+          <button
+            class="rounded bg-amber-500 px-4 py-2 text-white transition hover:bg-amber-600"
+            @click="clearStrokesOnly"
+          >
+            只清空笔迹
+          </button>
+
+          <button
+            class="rounded px-4 py-2 text-white transition disabled:cursor-not-allowed disabled:bg-slate-400"
+            :class="isGenerating ? 'bg-slate-400' : 'bg-emerald-500 hover:bg-emerald-600'"
+            :disabled="isGenerating"
+            @click="exportInpaintingData"
+          >
+            {{ isGenerating ? 'AI 正在施展魔法...' : '获取重绘数据' }}
+          </button>
+        </div>
+      </section>
+
+      <section class="rounded bg-white p-4 shadow">
+        <h2 class="mb-3 text-base font-semibold text-slate-800">重绘结果</h2>
+        <div
+          class="flex h-[640px] items-center justify-center overflow-hidden rounded border border-slate-300 bg-slate-50"
+        >
+          <img
+            v-if="resultImageBase64"
+            :src="resultImageBase64"
+            alt="重绘结果图"
+            class="max-h-full max-w-full object-contain"
+          />
+          <p
+            v-else
+            class="px-4 text-center text-sm text-slate-500"
+          >
+            结果图将在这里显示。请先上传底图、绘制遮罩并点击“获取重绘数据”。
+          </p>
+        </div>
+      </section>
     </div>
-
-    <div class="mb-4 w-[600px] rounded bg-white px-4 py-3 shadow">
-      <label class="mb-2 block text-sm text-slate-700">重绘提示词（Prompt）</label>
-      <input
-        v-model="promptText"
-        type="text"
-        placeholder="例如：把被涂抹区域改成绿色草地"
-        class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
-      />
-    </div>
-
-    <canvas
-      ref="drawingCanvas"
-      class="rounded border border-slate-300 shadow"
-    />
-
-    <button
-      class="mt-4 rounded bg-red-500 px-4 py-2 text-white transition hover:bg-red-600"
-      @click="clearCanvas"
-    >
-      清空
-    </button>
-
-    <button
-      class="mt-3 rounded bg-amber-500 px-4 py-2 text-white transition hover:bg-amber-600"
-      @click="clearStrokesOnly"
-    >
-      只清空笔迹
-    </button>
-
-    <button
-      class="mt-3 rounded bg-emerald-500 px-4 py-2 text-white transition hover:bg-emerald-600"
-      @click="exportInpaintingData"
-    >
-      获取重绘数据
-    </button>
   </main>
 </template>
