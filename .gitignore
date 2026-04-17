@@ -26,6 +26,8 @@ __pycache__/
 venv/
 env/
 .venv/
+.venv312/
+.venv*/
 # 后端的敏感环境变量
 .env
 
