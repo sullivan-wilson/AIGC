@@ -8,12 +8,14 @@ from deep_translator import GoogleTranslator
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
 from PIL import Image, ImageOps
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class RedrawRequest(BaseModel):
     prompt: str
     negative_prompt: str = ""
+    strength: float = Field(default=1.0, ge=0.0, le=1.0)
+    guidance_scale: float = Field(default=10.0, ge=1.0, le=20.0)
     original_image: str
     mask_image: str
 
@@ -187,9 +189,9 @@ async def redraw(payload: RedrawRequest):
             negative_prompt=english_negative_prompt,
             image=original_image,
             mask_image=mask_image,
-            strength=0.95,
+            strength=payload.strength,
             num_inference_steps=35,
-            guidance_scale=7.5,
+            guidance_scale=payload.guidance_scale,
         )
         result_image = result.images[0]
 

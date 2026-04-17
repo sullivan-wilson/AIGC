@@ -6,6 +6,8 @@ const drawingCanvas = ref(null)
 const fileInputRef = ref(null)
 const promptText = ref('')
 const negativePromptText = ref('green grass, vegetation, meadow, forest')
+const strengthValue = ref(1.0)
+const cfgScaleValue = ref(10.0)
 const resultImageBase64 = ref('')
 const isGenerating = ref(false)
 let fabricCanvas = null
@@ -279,6 +281,8 @@ async function exportInpaintingData() {
     // 在控制台额外输出 prompt，方便联调时排查文本字段传输问题
     console.log('prompt:', promptText.value)
     console.log('negative_prompt:', negativePromptText.value)
+    console.log('strength:', strengthValue.value)
+    console.log('guidance_scale:', cfgScaleValue.value)
 
     const response = await fetch('http://127.0.0.1:8000/api/redraw', {
       method: 'POST',
@@ -288,6 +292,8 @@ async function exportInpaintingData() {
       body: JSON.stringify({
         prompt: promptText.value,
         negative_prompt: negativePromptText.value,
+        strength: Number(strengthValue.value),
+        guidance_scale: Number(cfgScaleValue.value),
         original_image: originalImageBase64,
         mask_image: maskImageBase64
       })
@@ -359,6 +365,30 @@ onUnmounted(() => {
             type="text"
             placeholder="例如：green grass, vegetation, meadow, forest"
             class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
+          />
+
+          <label class="mb-2 mt-3 block text-sm text-slate-700">
+            重绘强度（Strength）: {{ Number(strengthValue).toFixed(2) }}
+          </label>
+          <input
+            v-model="strengthValue"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            class="w-full cursor-pointer"
+          />
+
+          <label class="mb-2 mt-3 block text-sm text-slate-700">
+            提示词服从度（CFG Scale）: {{ Number(cfgScaleValue).toFixed(1) }}
+          </label>
+          <input
+            v-model="cfgScaleValue"
+            type="range"
+            min="1"
+            max="20"
+            step="0.5"
+            class="w-full cursor-pointer"
           />
         </div>
 
