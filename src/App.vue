@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { Canvas, Circle, FabricImage } from 'fabric'
 
 const drawingCanvas = ref(null)
@@ -9,12 +9,15 @@ const negativePromptText = ref('green grass, vegetation, meadow, forest')
 const strengthValue = ref(1.0)
 const cfgScaleValue = ref(10.0)
 const resultImageBase64 = ref('')
+/** Before/After 对比：0–100，从左侧裁掉顶层「结果图」的比例；0=全结果，100=全原图 */
+const compareSplitPercent = ref(50)
 const isGenerating = ref(false)
 const isSegmenting = ref(false)
 const segmentStatusText = ref('')
 const currentToolMode = ref('ai')
 const brushSize = ref(24)
-const eraserSize = ref(28)
+// 橡皮擦默认比画笔略大，便于快速修边；仍可通过滑块继续加大
+const eraserSize = ref(48)
 
 let fabricCanvas = null
 const CANVAS_SIZE = 600
@@ -45,6 +48,78 @@ let isManualDrawing = false
 let lastDrawPoint = null
 let overlayRenderScheduled = false
 let overlayRenderToken = 0
+
+watch(resultImageBase64, (v) => {
+  if (v) {
+    compareSplitPercent.value = 50
+  }
+})
+
+/** 重绘等待期极客风伪终端日志（与 isGenerating 同步显示/清理） */
+const terminalLines = ref([])
+const terminalBodyRef = ref(null)
+let loadingLogIntervalId = null
+let loadingLogCursor = 0
+
+const GENERATING_LOG_POOL = [
+  '[SYSTEM] Handshake with SDXL inpaint pipeline...',
+  '[SAM] Rasterizing binary mask tensor -> 8-bit plane...',
+  '[GPU] Allocating VRAM blocks; enabling attention slicing...',
+  '[UNet] Denoising latents across diffusion steps...',
+  '[CFG] Applying classifier-free guidance scale...',
+  '[VAE] Decoding latent grid to pixel buffer...',
+  '[IO] Streaming PNG payload to client bridge...',
+  '[MEM] Synchronizing host/device after step batch...',
+  '[DIFF] Scheduler stepping: EulerDiscrete / sigma blend...',
+  '[MASK] Aligning inpaint ROI with padded canvas quad...'
+]
+
+function formatLogTime() {
+  const d = new Date()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  return `${hh}:${mm}:${ss}`
+}
+
+function pushGeneratingLogLine() {
+  const line = GENERATING_LOG_POOL[loadingLogCursor % GENERATING_LOG_POOL.length]
+  loadingLogCursor += 1
+  const next = [...terminalLines.value, `${formatLogTime()} ${line}`]
+  terminalLines.value = next.slice(-14)
+  requestAnimationFrame(() => {
+    const el = terminalBodyRef.value
+    if (el) {
+      el.scrollTop = el.scrollHeight
+    }
+  })
+}
+
+function startGeneratingTerminal() {
+  stopGeneratingTerminal()
+  terminalLines.value = []
+  loadingLogCursor = 0
+  pushGeneratingLogLine()
+  loadingLogIntervalId = window.setInterval(() => {
+    pushGeneratingLogLine()
+  }, 1500)
+}
+
+function stopGeneratingTerminal() {
+  if (loadingLogIntervalId != null) {
+    clearInterval(loadingLogIntervalId)
+    loadingLogIntervalId = null
+  }
+  terminalLines.value = []
+}
+
+watch(isGenerating, (loading) => {
+  if (loading) {
+    startGeneratingTerminal()
+  } else {
+    stopGeneratingTerminal()
+  }
+})
 
 const BRUSH_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Ccircle cx='8' cy='8' r='4' fill='%2322c55e' stroke='white' stroke-width='1.2'/%3E%3Cpath d='M11.5 11.5 L17 17' stroke='%230f172a' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") 2 2, crosshair`
 const ERASER_CURSOR = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'%3E%3Crect x='4' y='6' width='12' height='9' rx='2' ry='2' transform='rotate(-30 10 10)' fill='%23f97316' stroke='white' stroke-width='1.2'/%3E%3C/svg%3E") 3 3, cell`
@@ -629,6 +704,7 @@ async function exportInpaintingData() {
 }
 
 onUnmounted(() => {
+  stopGeneratingTerminal()
   if (fabricCanvas) {
     // 组件销毁时释放 Fabric 资源，防止内存泄漏
     fabricCanvas.dispose()
@@ -638,12 +714,16 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="min-h-screen bg-slate-100 p-4">
+  <main class="min-h-screen p-4 text-slate-200">
     <div class="mx-auto grid max-w-[1320px] gap-4 lg:grid-cols-[720px_1fr]">
-      <section class="rounded bg-white p-4 shadow">
-        <h1 class="mb-4 text-lg font-semibold text-slate-800">AIGC 局部重绘工作台</h1>
+      <section class="glass-panel rounded-2xl p-5">
+        <h1
+          class="mb-5 bg-gradient-to-r from-cyan-200 via-sky-200 to-violet-200 bg-clip-text text-lg font-semibold tracking-tight text-transparent"
+        >
+          AIGC 局部重绘工作台
+        </h1>
 
-        <div class="mb-4 flex flex-wrap items-center gap-4 rounded bg-slate-50 px-4 py-3">
+        <div class="glass-inset mb-4 flex flex-wrap items-center gap-3 px-4 py-3">
           <input
             ref="fileInputRef"
             type="file"
@@ -653,53 +733,57 @@ onUnmounted(() => {
           />
 
           <button
-            class="rounded bg-sky-500 px-4 py-2 text-white transition hover:bg-sky-600"
+            type="button"
+            class="btn-neon-cyan"
             @click="openUploadDialog"
           >
             上传底图
           </button>
-          <span class="text-sm text-slate-600">交互模式切换：</span>
+          <span class="text-sm text-slate-400">交互模式切换：</span>
           <button
-            class="rounded px-3 py-1.5 text-sm text-white transition"
-            :class="currentToolMode === 'ai' ? 'bg-sky-600' : 'bg-slate-500 hover:bg-slate-600'"
+            type="button"
+            class="rounded-lg px-3 py-1.5 text-sm font-medium transition"
+            :class="currentToolMode === 'ai' ? 'btn-tool-active-ai' : 'btn-ghost-dark'"
             @click="setToolMode('ai')"
           >
             AI 点选
           </button>
           <button
-            class="rounded px-3 py-1.5 text-sm text-white transition"
-            :class="currentToolMode === 'brush' ? 'bg-emerald-600' : 'bg-slate-500 hover:bg-slate-600'"
+            type="button"
+            class="rounded-lg px-3 py-1.5 text-sm font-medium transition"
+            :class="currentToolMode === 'brush' ? 'btn-tool-active-brush' : 'btn-ghost-dark'"
             @click="setToolMode('brush')"
           >
             画笔添加
           </button>
           <button
-            class="rounded px-3 py-1.5 text-sm text-white transition"
-            :class="currentToolMode === 'eraser' ? 'bg-rose-600' : 'bg-slate-500 hover:bg-slate-600'"
+            type="button"
+            class="rounded-lg px-3 py-1.5 text-sm font-medium transition"
+            :class="currentToolMode === 'eraser' ? 'btn-tool-active-eraser' : 'btn-ghost-dark'"
             @click="setToolMode('eraser')"
           >
             橡皮擦减去
           </button>
         </div>
 
-        <div class="mb-4 rounded bg-slate-50 px-4 py-3">
-          <label class="mb-2 block text-sm text-slate-700">重绘提示词（Prompt）</label>
+        <div class="glass-inset mb-4 px-4 py-4">
+          <label class="mb-2 block text-sm text-slate-300">重绘提示词（Prompt）</label>
           <input
             v-model="promptText"
             type="text"
             placeholder="例如：把被涂抹区域改成绿色草地"
-            class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
+            class="input-tech"
           />
 
-          <label class="mb-2 mt-3 block text-sm text-slate-700">反向提示词（Negative Prompt）</label>
+          <label class="mb-2 mt-3 block text-sm text-slate-300">反向提示词（Negative Prompt）</label>
           <input
             v-model="negativePromptText"
             type="text"
             placeholder="例如：green grass, vegetation, meadow, forest"
-            class="w-full rounded border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-sky-500"
+            class="input-tech"
           />
 
-          <label class="mb-2 mt-3 block text-sm text-slate-700">
+          <label class="mb-2 mt-3 block text-sm text-slate-300">
             重绘强度（Strength）: {{ Number(strengthValue).toFixed(2) }}
           </label>
           <input
@@ -708,10 +792,10 @@ onUnmounted(() => {
             min="0"
             max="1"
             step="0.01"
-            class="w-full cursor-pointer"
+            class="slider-tech"
           />
 
-          <label class="mb-2 mt-3 block text-sm text-slate-700">
+          <label class="mb-2 mt-3 block text-sm text-slate-300">
             提示词服从度（CFG Scale）: {{ Number(cfgScaleValue).toFixed(1) }}
           </label>
           <input
@@ -720,10 +804,10 @@ onUnmounted(() => {
             min="1"
             max="20"
             step="0.5"
-            class="w-full cursor-pointer"
+            class="slider-tech"
           />
 
-          <label class="mb-2 mt-3 block text-sm text-slate-700">
+          <label class="mb-2 mt-3 block text-sm text-slate-300">
             画笔粗细（仅画笔模式）: {{ brushSize }}
           </label>
           <input
@@ -732,61 +816,71 @@ onUnmounted(() => {
             min="2"
             max="80"
             step="1"
-            class="w-full cursor-pointer"
+            class="slider-tech"
           />
 
-          <label class="mb-2 mt-3 block text-sm text-slate-700">
+          <label class="mb-2 mt-3 block text-sm text-slate-300">
             橡皮擦粗细（仅橡皮擦模式）: {{ eraserSize }}
           </label>
           <input
             v-model="eraserSize"
             type="range"
             min="2"
-            max="80"
+            max="120"
             step="1"
-            class="w-full cursor-pointer"
+            class="slider-tech"
           />
         </div>
 
-        <div class="flex justify-center">
+        <div class="relative mx-auto flex w-fit max-w-full justify-center">
           <canvas
             ref="drawingCanvas"
-            class="rounded border border-slate-300 shadow"
+            class="canvas-frame max-w-full bg-slate-950/40"
           />
+          <div
+            v-if="isGenerating"
+            class="canvas-scan-overlay pointer-events-none absolute inset-0 overflow-hidden rounded-[0.75rem]"
+            aria-hidden="true"
+          >
+            <div class="canvas-scan-line" />
+          </div>
         </div>
 
         <p
           v-if="isSegmenting"
-          class="mt-3 text-center text-sm text-sky-600"
+          class="mt-3 text-center text-sm text-cyan-400 drop-shadow-[0_0_8px_rgba(34,211,238,0.45)]"
         >
           {{ segmentStatusText || 'AI正在识别物体边缘...' }}
         </p>
 
         <div class="mt-4 flex flex-wrap justify-center gap-3">
           <button
-            class="rounded bg-red-500 px-4 py-2 text-white transition hover:bg-red-600"
+            type="button"
+            class="rounded-lg border border-rose-400/35 bg-rose-600/85 px-4 py-2 text-sm font-medium text-white shadow-[0_0_18px_rgba(244,63,94,0.25)] transition hover:bg-rose-500"
             @click="clearCanvas"
           >
             清空
           </button>
 
           <button
-            class="rounded bg-amber-500 px-4 py-2 text-white transition hover:bg-amber-600"
+            type="button"
+            class="rounded-lg border border-amber-400/35 bg-amber-600/85 px-4 py-2 text-sm font-medium text-slate-950 shadow-[0_0_18px_rgba(245,158,11,0.25)] transition hover:bg-amber-500"
             @click="clearMaskOnly"
           >
             清空当前遮罩
           </button>
 
           <button
-            class="rounded bg-violet-500 px-4 py-2 text-white transition hover:bg-violet-600"
+            type="button"
+            class="btn-neon-violet px-4 py-2"
             @click="undoLastSamClick"
           >
             撤销上一次点击
           </button>
 
           <button
-            class="rounded px-4 py-2 text-white transition disabled:cursor-not-allowed disabled:bg-slate-400"
-            :class="isGenerating ? 'bg-slate-400' : 'bg-emerald-500 hover:bg-emerald-600'"
+            type="button"
+            class="rounded-lg border border-emerald-400/40 bg-gradient-to-r from-emerald-500 to-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 shadow-[0_0_22px_rgba(16,185,129,0.35)] transition disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
             :disabled="isGenerating"
             @click="exportInpaintingData"
           >
@@ -795,25 +889,247 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section class="rounded bg-white p-4 shadow">
-        <h2 class="mb-3 text-base font-semibold text-slate-800">重绘结果</h2>
+      <section class="glass-panel flex flex-col rounded-2xl p-5">
+        <h2 class="mb-3 text-base font-semibold text-white">重绘结果</h2>
         <div
-          class="flex h-[640px] items-center justify-center overflow-hidden rounded border border-slate-300 bg-slate-50"
+          class="glass-inset relative flex h-[640px] flex-1 items-center justify-center overflow-hidden"
         >
-          <img
-            v-if="resultImageBase64"
-            :src="resultImageBase64"
-            alt="重绘结果图"
-            class="max-h-full max-w-full object-contain"
-          />
+          <template v-if="resultImageBase64 && uploadedImageBase64">
+            <div class="before-after-root relative mx-auto flex max-h-full max-w-full items-center justify-center p-2">
+              <div class="before-after-stack relative inline-block max-h-full max-w-full select-none leading-none">
+                <!-- 底层：原图（决定叠放区域尺寸，与顶层同盒 + object-contain 对齐） -->
+                <img
+                  :src="uploadedImageBase64"
+                  alt="原图"
+                  class="before-after-base relative z-0 block max-h-[600px] max-w-full object-contain pointer-events-none"
+                  draggable="false"
+                />
+                <!-- 顶层：结果图，从左侧裁掉 compareSplitPercent%，露出下方原图 -->
+                <img
+                  :src="resultImageBase64"
+                  alt="重绘结果"
+                  class="before-after-top absolute left-0 top-0 z-[1] h-full w-full object-contain pointer-events-none"
+                  draggable="false"
+                  :style="{
+                    clipPath: `inset(0 0 0 ${compareSplitPercent}%)`
+                  }"
+                />
+                <!-- 分割线与拖拽把手（不拦截鼠标，由透明 range 接收拖拽） -->
+                <div
+                  class="before-after-divider pointer-events-none absolute top-0 bottom-0 z-[2] flex w-0 -translate-x-1/2 flex-col items-center justify-center"
+                  :style="{ left: `${compareSplitPercent}%` }"
+                  aria-hidden="true"
+                >
+                  <div class="before-after-line" />
+                  <div class="before-after-handle relative z-[3] shrink-0">
+                    <svg
+                      class="before-after-arrows"
+                      viewBox="0 0 24 48"
+                      width="24"
+                      height="48"
+                      fill="none"
+                      xmlns="http://www.w3.org/2000/svg"
+                    >
+                      <rect
+                        x="1"
+                        y="1"
+                        width="22"
+                        height="46"
+                        rx="11"
+                        fill="rgba(15,23,42,0.92)"
+                        stroke="rgba(56,189,248,0.85)"
+                        stroke-width="1.5"
+                      />
+                      <path
+                        d="M9 18 L6 22 L9 26"
+                        stroke="#e0f2fe"
+                        stroke-width="1.8"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                      <path
+                        d="M15 18 L18 22 L15 26"
+                        stroke="#e0f2fe"
+                        stroke-width="1.8"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                  </div>
+                </div>
+                <input
+                  v-model.number="compareSplitPercent"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="0.05"
+                  class="before-after-range"
+                  aria-label="原图与重绘结果对比"
+                />
+              </div>
+            </div>
+          </template>
           <p
             v-else
-            class="px-4 text-center text-sm text-slate-500"
+            class="px-4 text-center text-sm text-slate-400"
           >
-            结果图将在这里显示。请先上传底图、绘制遮罩并点击“获取重绘数据”。
+            结果图将在这里显示。请先上传底图、绘制遮罩并点击“获取重绘数据”。生成后可拖动对比原图与重绘效果。
           </p>
         </div>
       </section>
     </div>
+
+    <!-- 重绘加载：右下角虚拟终端（isGenerating 时显示，结束后移除） -->
+    <aside
+      v-if="isGenerating"
+      class="loading-terminal fixed bottom-5 right-5 z-[100] flex w-[min(22rem,calc(100vw-2.5rem))] flex-col overflow-hidden rounded-lg border border-emerald-500/30 bg-black/92 shadow-[0_0_32px_rgba(16,185,129,0.2)]"
+      aria-live="polite"
+    >
+      <div
+        class="border-b border-emerald-900/80 bg-emerald-950/50 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-emerald-400/90"
+      >
+        pipeline@aigc:~$ — inpaint_job
+      </div>
+      <div
+        ref="terminalBodyRef"
+        class="loading-terminal-body max-h-48 overflow-y-auto px-3 py-2 font-mono text-[11px] leading-relaxed text-emerald-400"
+      >
+        <div
+          v-for="(line, idx) in terminalLines"
+          :key="idx"
+          class="whitespace-pre-wrap break-all"
+        >
+          {{ line }}
+        </div>
+        <span class="loading-terminal-cursor inline-block h-3 w-2 align-middle bg-emerald-400" />
+      </div>
+    </aside>
   </main>
 </template>
+
+<style scoped>
+.before-after-stack {
+  position: relative;
+}
+
+.before-after-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    180deg,
+    rgba(34, 211, 238, 0.05) 0%,
+    rgba(34, 211, 238, 0.95) 18%,
+    rgba(167, 139, 250, 0.95) 82%,
+    rgba(167, 139, 250, 0.05) 100%
+  );
+  box-shadow:
+    0 0 10px rgba(34, 211, 238, 0.75),
+    0 0 22px rgba(34, 211, 238, 0.45);
+}
+
+.before-after-range {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: ew-resize;
+  opacity: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  outline: none;
+}
+
+.before-after-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 48px;
+  height: 100%;
+  min-height: 120px;
+  background: transparent;
+  cursor: ew-resize;
+}
+
+.before-after-range::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+
+.before-after-range::-moz-range-thumb {
+  width: 48px;
+  height: 100%;
+  min-height: 120px;
+  background: transparent;
+  border: 0;
+  cursor: ew-resize;
+}
+
+.before-after-range::-moz-range-track {
+  height: 100%;
+  background: transparent;
+}
+
+/* 画布雷达扫描线（isGenerating 时覆盖） */
+.canvas-scan-overlay {
+  background: rgba(15, 23, 42, 0.42);
+  box-shadow: inset 0 0 24px rgba(34, 211, 238, 0.08);
+}
+
+.canvas-scan-line {
+  position: absolute;
+  left: -5%;
+  width: 110%;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(34, 211, 238, 0.15) 20%,
+    rgba(167, 233, 250, 0.95) 50%,
+    rgba(34, 211, 238, 0.15) 80%,
+    transparent 100%
+  );
+  box-shadow:
+    0 0 16px rgba(34, 211, 238, 0.85),
+    0 0 40px rgba(34, 211, 238, 0.35);
+  animation: canvas-scan-sweep 2.4s linear infinite;
+}
+
+@keyframes canvas-scan-sweep {
+  0% {
+    top: 0;
+    opacity: 0.85;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    top: calc(100% - 4px);
+    opacity: 0.85;
+  }
+}
+
+.loading-terminal-cursor {
+  animation: terminal-cursor-blink 1s step-end infinite;
+}
+
+@keyframes terminal-cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+</style>

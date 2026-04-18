@@ -71,6 +71,21 @@ def numpy_mask_to_base64(mask_array: np.ndarray) -> str:
         raise ValueError(f"遮罩转 Base64 失败: {str(exc)}") from exc
 
 
+def letterboxed_inner_bbox(
+    image: Image.Image, target_size: int, *, mode: str = "RGB", resample=Image.Resampling.LANCZOS
+) -> tuple[int, int, int, int]:
+    """
+    与 resize_with_padding 使用相同的 ImageOps.contain + 居中逻辑，
+    返回正方形画布上「有效图像区域」的像素边界 (left, upper, right, lower)，供结果图反 letterbox。
+    """
+    converted = image.convert(mode)
+    contained = ImageOps.contain(converted, (target_size, target_size), method=resample)
+    w, h = contained.size
+    left = (target_size - w) // 2
+    top = (target_size - h) // 2
+    return (left, top, left + w, top + h)
+
+
 def resize_with_padding(
     image: Image.Image,
     target_size: int,
@@ -235,8 +250,9 @@ async def redraw(payload: RedrawRequest):
             )
 
         # 3) 先尝试 1024 推理，若 OOM 自动回退到 768 再重试一次
+        used_target = 1024
         try:
-            result = run_inpaint_once(1024)
+            result = run_inpaint_once(used_target)
         except RuntimeError as exc:
             error_message = str(exc).lower()
             if "out of memory" not in error_message:
@@ -244,11 +260,18 @@ async def redraw(payload: RedrawRequest):
             print("检测到 OOM，自动回退分辨率到 768 重试。")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            result = run_inpaint_once(768)
+            used_target = 768
+            result = run_inpaint_once(used_target)
 
-        result_image = result.images[0]
+        result_square = result.images[0].convert("RGB")
 
-        # 4) 将结果图编码为 Base64 返回给前端
+        # 4) 去掉 letterbox 黑边，缩放回与上传原图完全一致的像素尺寸，便于前端 Before/After 对齐
+        inner = letterboxed_inner_bbox(original_image, used_target)
+        result_image = result_square.crop(inner).resize(
+            original_image.size, Image.Resampling.LANCZOS
+        )
+
+        # 5) 将结果图编码为 Base64 返回给前端
         result_image_base64 = pil_to_base64(result_image)
 
         return {

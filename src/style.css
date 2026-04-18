@@ -2,11 +2,123 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 暗黑科技风：全局基底与默认文字 */
 html,
 body,
 #app {
   width: 100%;
-  height: 100%;
+  min-height: 100%;
   margin: 0;
   padding: 0;
+  color: #e2e8f0;
+  background-color: #0f172a;
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% -20%, rgba(56, 189, 248, 0.12), transparent 50%),
+    radial-gradient(ellipse 80% 60% at 100% 100%, rgba(139, 92, 246, 0.1), transparent 45%),
+    linear-gradient(180deg, #0f172a 0%, #111827 100%);
+  background-attachment: fixed;
+}
+
+/* 毛玻璃面板（可在组件上用 class="glass-panel"） */
+@layer components {
+  .glass-panel {
+    background: rgba(30, 41, 59, 0.7);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    box-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .glass-inset {
+    background: rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    border-radius: 0.75rem;
+  }
+
+  .input-tech {
+    @apply w-full rounded-lg px-3 py-2 text-sm outline-none transition;
+    background: rgba(15, 23, 42, 0.65);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    color: #f1f5f9;
+  }
+
+  .input-tech::placeholder {
+    color: #64748b;
+  }
+
+  .input-tech:focus {
+    border-color: rgba(56, 189, 248, 0.65);
+    box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35), 0 0 20px rgba(56, 189, 248, 0.12);
+  }
+
+  .slider-tech {
+    @apply w-full cursor-pointer;
+    accent-color: #38bdf8;
+  }
+
+  .btn-neon-cyan {
+    @apply rounded-lg px-4 py-2 text-sm font-medium text-slate-950 transition;
+    background: linear-gradient(135deg, #22d3ee 0%, #38bdf8 100%);
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.25);
+  }
+
+  .btn-neon-cyan:hover:not(:disabled) {
+    box-shadow: 0 0 28px rgba(34, 211, 238, 0.45);
+    filter: brightness(1.05);
+  }
+
+  .btn-neon-violet {
+    @apply rounded-lg px-4 py-2 text-sm font-medium text-white transition;
+    background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 100%);
+    box-shadow: 0 0 18px rgba(139, 92, 246, 0.3);
+  }
+
+  .btn-neon-violet:hover:not(:disabled) {
+    box-shadow: 0 0 26px rgba(139, 92, 246, 0.45);
+    filter: brightness(1.06);
+  }
+
+  .btn-ghost-dark {
+    @apply rounded-lg px-3 py-1.5 text-sm font-medium transition;
+    background: rgba(51, 65, 85, 0.55);
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    color: #e2e8f0;
+  }
+
+  .btn-ghost-dark:hover:not(:disabled) {
+    background: rgba(71, 85, 105, 0.65);
+    border-color: rgba(56, 189, 248, 0.35);
+  }
+
+  .btn-tool-active-ai {
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.35), rgba(56, 189, 248, 0.25));
+    border: 1px solid rgba(34, 211, 238, 0.55);
+    color: #ecfeff;
+    box-shadow: 0 0 16px rgba(34, 211, 238, 0.2);
+  }
+
+  .btn-tool-active-brush {
+    background: linear-gradient(135deg, rgba(52, 211, 153, 0.35), rgba(16, 185, 129, 0.2));
+    border: 1px solid rgba(52, 211, 153, 0.5);
+    color: #ecfdf5;
+    box-shadow: 0 0 16px rgba(52, 211, 153, 0.18);
+  }
+
+  .btn-tool-active-eraser {
+    background: linear-gradient(135deg, rgba(251, 113, 133, 0.35), rgba(244, 63, 94, 0.22));
+    border: 1px solid rgba(251, 113, 133, 0.55);
+    color: #fff1f2;
+    box-shadow: 0 0 16px rgba(251, 113, 133, 0.18);
+  }
+
+  .canvas-frame {
+    border-radius: 0.75rem;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.35),
+      0 12px 40px rgba(0, 0, 0, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
 }
