@@ -1,7 +1,9 @@
 import base64
 import io
 from contextlib import asynccontextmanager
+from typing import List
 
+import numpy as np
 import torch
 from diffusers import StableDiffusionXLInpaintPipeline
 from deep_translator import GoogleTranslator
@@ -9,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException
 from PIL import Image, ImageOps
 from pydantic import BaseModel, Field
+from transformers import SamModel, SamProcessor
 
 
 class RedrawRequest(BaseModel):
@@ -18,6 +21,11 @@ class RedrawRequest(BaseModel):
     guidance_scale: float = Field(default=10.0, ge=1.0, le=20.0)
     original_image: str
     mask_image: str
+
+
+class SegmentRequest(BaseModel):
+    image: str
+    points: List[List[int]]
 
 
 def base64_to_pil(base64_str: str) -> Image.Image:
@@ -48,6 +56,19 @@ def pil_to_base64(pil_image: Image.Image) -> str:
         return f"data:image/png;base64,{encoded}"
     except Exception as exc:
         raise ValueError(f"图片转 Base64 失败: {str(exc)}") from exc
+
+
+def numpy_mask_to_base64(mask_array: np.ndarray) -> str:
+    """
+    将二维 numpy 遮罩数组编码为 Base64 PNG（data URL）。
+    """
+    try:
+        if mask_array.ndim != 2:
+            raise ValueError("mask 数组必须是二维")
+        mask_image = Image.fromarray(mask_array.astype(np.uint8), mode="L")
+        return pil_to_base64(mask_image)
+    except Exception as exc:
+        raise ValueError(f"遮罩转 Base64 失败: {str(exc)}") from exc
 
 
 def resize_with_padding(
@@ -112,10 +133,29 @@ async def lifespan(app: FastAPI):
         app.state.pipe = None
         app.state.pipe_error = str(exc)
         print(f"模型加载失败: {str(exc)}")
+
+    try:
+        sam_model_id = "facebook/sam-vit-base"
+        # 显存隔离策略：SAM 固定走 CPU，不与 SDXL 竞争 GPU 显存
+        app.state.sam_processor = SamProcessor.from_pretrained(sam_model_id)
+        app.state.sam_model = SamModel.from_pretrained(sam_model_id).to("cpu")
+        app.state.sam_model.eval()
+        app.state.sam_error = None
+        print(f"SAM 模型加载完成（CPU）: {sam_model_id}")
+    except Exception as exc:
+        app.state.sam_processor = None
+        app.state.sam_model = None
+        app.state.sam_error = str(exc)
+        print(f"SAM 模型加载失败: {str(exc)}")
+
     yield
     # 服务关闭时主动释放模型与 CUDA 缓存，避免显存残留
     if getattr(app.state, "pipe", None) is not None:
         del app.state.pipe
+    if getattr(app.state, "sam_model", None) is not None:
+        del app.state.sam_model
+    if getattr(app.state, "sam_processor", None) is not None:
+        del app.state.sam_processor
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -164,35 +204,48 @@ async def redraw(payload: RedrawRequest):
         original_image = base64_to_pil(payload.original_image)
         mask_image = base64_to_pil(payload.mask_image)
 
-        # 2) 使用同比例缩放+填充适配到 SDXL 输入，避免图像被强行拉伸
-        original_image = resize_with_padding(
-            image=original_image,
-            target_size=1024,
-            mode="RGB",
-            background_color=(0, 0, 0),
-            resample=Image.Resampling.LANCZOS,
-        )
-        # mask 使用最近邻缩放避免边缘灰阶插值，并保持黑底语义
-        mask_image = resize_with_padding(
-            image=mask_image,
-            target_size=1024,
-            mode="L",
-            background_color=0,
-            resample=Image.Resampling.NEAREST,
-        )
-        # 将 mask 强制二值化为 0/255 的硬边遮罩，提升局部重绘确定性
-        mask_image = mask_image.point(lambda p: 255 if p > 127 else 0)
+        def run_inpaint_once(target_size: int):
+            # 使用同比例缩放+填充适配到 SDXL 输入，避免图像被强行拉伸
+            resized_original = resize_with_padding(
+                image=original_image,
+                target_size=target_size,
+                mode="RGB",
+                background_color=(0, 0, 0),
+                resample=Image.Resampling.LANCZOS,
+            )
+            # mask 使用最近邻缩放避免边缘灰阶插值，并保持黑底语义
+            resized_mask = resize_with_padding(
+                image=mask_image,
+                target_size=target_size,
+                mode="L",
+                background_color=0,
+                resample=Image.Resampling.NEAREST,
+            )
+            # 将 mask 强制二值化为 0/255 的硬边遮罩，提升局部重绘确定性
+            resized_mask = resized_mask.point(lambda p: 255 if p > 127 else 0)
+            return app.state.pipe(
+                prompt=english_prompt,
+                negative_prompt=english_negative_prompt,
+                image=resized_original,
+                mask_image=resized_mask,
+                strength=payload.strength,
+                # 默认步数下调，优先保稳定并降低显存压力
+                num_inference_steps=24,
+                guidance_scale=payload.guidance_scale,
+            )
 
-        # 3) 调用 Stable Diffusion Inpainting 进行局部重绘
-        result = app.state.pipe(
-            prompt=english_prompt,
-            negative_prompt=english_negative_prompt,
-            image=original_image,
-            mask_image=mask_image,
-            strength=payload.strength,
-            num_inference_steps=35,
-            guidance_scale=payload.guidance_scale,
-        )
+        # 3) 先尝试 1024 推理，若 OOM 自动回退到 768 再重试一次
+        try:
+            result = run_inpaint_once(1024)
+        except RuntimeError as exc:
+            error_message = str(exc).lower()
+            if "out of memory" not in error_message:
+                raise
+            print("检测到 OOM，自动回退分辨率到 768 重试。")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            result = run_inpaint_once(768)
+
         result_image = result.images[0]
 
         # 4) 将结果图编码为 Base64 返回给前端
@@ -216,3 +269,53 @@ async def redraw(payload: RedrawRequest):
     except Exception as exc:
         # 统一兜底异常处理，保证接口出现异常时能返回明确错误信息
         raise HTTPException(status_code=500, detail=f"Inpainting 处理失败: {str(exc)}") from exc
+
+
+@app.post("/api/segment")
+async def segment(payload: SegmentRequest):
+    try:
+        if app.state.sam_model is None or app.state.sam_processor is None:
+            detail = getattr(app.state, "sam_error", None) or "SAM 模型未就绪，请检查服务启动日志。"
+            raise HTTPException(status_code=503, detail=f"SAM 模型未就绪：{detail}")
+
+        if not payload.points:
+            raise HTTPException(status_code=400, detail="points 不能为空。")
+
+        input_image = base64_to_pil(payload.image)
+        image_array = np.array(input_image.convert("RGB"))
+        input_points = [[payload.points]]
+        input_labels = [[[1 for _ in payload.points]]]
+
+        # SAM 默认在 CPU 推理，避免与 SDXL 抢占显存
+        inputs = app.state.sam_processor(
+            image_array,
+            input_points=input_points,
+            input_labels=input_labels,
+            return_tensors="pt",
+        )
+        inputs = {key: value.to("cpu") for key, value in inputs.items()}
+
+        with torch.no_grad():
+            outputs = app.state.sam_model(**inputs)
+
+        masks = app.state.sam_processor.image_processor.post_process_masks(
+            outputs.pred_masks.cpu(),
+            inputs["original_sizes"].cpu(),
+            inputs["reshaped_input_sizes"].cpu(),
+        )
+        iou_scores = outputs.iou_scores[0, 0].cpu().numpy()
+        best_mask_index = int(np.argmax(iou_scores))
+        best_mask = masks[0][0][best_mask_index].cpu().numpy()
+
+        # 转为标准二值遮罩：前景 255（白），背景 0（黑）
+        binary_mask = np.where(best_mask > 0, 255, 0).astype(np.uint8)
+        mask_base64 = numpy_mask_to_base64(binary_mask)
+
+        return {
+            "status": "success",
+            "mask_image": mask_base64,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"SAM 抠图失败: {str(exc)}") from exc
