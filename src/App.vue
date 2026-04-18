@@ -18,7 +18,6 @@ const currentToolMode = ref('ai')
 const brushSize = ref(24)
 // 橡皮擦默认比画笔略大，便于快速修边；仍可通过滑块继续加大
 const eraserSize = ref(48)
-
 let fabricCanvas = null
 const CANVAS_SIZE = 600
 const MASK_PREVIEW_OPACITY = 0.5
