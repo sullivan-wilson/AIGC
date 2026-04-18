@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 ```bash
 # 务必不要添加 --reload 参数，以保障极限显存调度
-python -m uvicorn main:app --host 0.0.0.0 --port 
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 启动成功后，在浏览器中访问：http://localhost:8000 即可进入工作台。
@@ -88,3 +88,68 @@ cpolar http 8000
 感谢 Meta AI 提供 Segment Anything 视觉分割模型。
 
 本项目为 南京航空航天大学 AIGC 课程结项成果。
+
+
+## 🚀 AIGC 项目快速启动与内网穿透指南
+
+> 本文档用于记录从零启动项目并完成公网发布的标准流程。
+
+### 🛠️ 第一步：启动核心后端服务（FastAPI）
+
+在 IDE（如 Cursor / VS Code）中打开项目，开启一个新的终端。
+
+1. 激活虚拟环境（如果尚未激活）：
+
+```powershell
+# Windows 环境
+.\.venv312\Scripts\activate
+```
+
+2. 启动 Uvicorn 服务：
+
+```powershell
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+验证标准：终端显示 `Uvicorn running on http://0.0.0.0:8000`。  
+本地测试：浏览器访问 `http://localhost:8000`，应能看到完整的 Vue 前端界面。
+
+### 🌐 第二步：建立公网隧道（Cloudflare）
+
+不要关闭后端终端，开启第二个终端并执行：
+
+```powershell
+.\cloudflared tunnel --url http://localhost:8000
+```
+
+在输出日志中寻找如下信息：
+
+```text
+Your quick Tunnel has been created! Visit it at:
+https://your-unique-name.trycloudflare.com
+```
+
+将该 `https://...trycloudflare.com` 链接发送至手机或评委端进行测试。
+
+### ⚠️ 开发者必读（保命守则）
+
+1. **路由冲突检查（422 报错预警）**
+   - 现象：访问根目录出现 `{"detail": ...}`。
+   - 原因：`main.py` 中根路径路由（`@app.get("/")`）与静态挂载逻辑冲突，或被错误绑定到需要请求体的处理函数。
+   - 解决：检查根路径处理逻辑，仅保留正确的根路由/静态挂载。
+
+2. **静态文件导入（NameError 预警）**
+   - 现象：报错 `NameError: name 'StaticFiles' is not defined`。
+   - 解决：在 `main.py` 顶部确认包含：
+     `from fastapi.staticfiles import StaticFiles`。
+
+3. **环境稳定性（路演关键）**
+   - 防止休眠：电脑设置为高性能模式，关闭自动睡眠。
+   - 终端保护：运行 `cloudflared` 的窗口不要按 `Ctrl+C`。
+   - 前端更新：修改 Vue 代码后，需重新执行 `npm run build`，再重启后端服务。
+
+### 📁 核心路径说明
+
+- 前端静态资源：`./dist`（由 `npm run build` 生成）
+- 后端核心逻辑：`./main.py`
+- 穿透执行程序：`./cloudflared.exe`（当前目录运行）

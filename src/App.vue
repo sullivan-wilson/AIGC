@@ -411,7 +411,7 @@ async function requestSamMask(originalX, originalY) {
     isSegmenting.value = true
     segmentStatusText.value = 'AI正在识别物体边缘...'
 
-    const response = await fetch('http://127.0.0.1:8000/api/segment', {
+    const response = await fetch('/api/segment', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -670,7 +670,7 @@ async function exportInpaintingData() {
     console.log('strength:', strengthValue.value)
     console.log('guidance_scale:', cfgScaleValue.value)
 
-    const response = await fetch('http://127.0.0.1:8000/api/redraw', {
+    const response = await fetch('/api/redraw', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'

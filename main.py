@@ -2,6 +2,7 @@ import base64
 import io
 from contextlib import asynccontextmanager
 from typing import List
+from fastapi.staticfiles import StaticFiles
 
 import numpy as np
 import torch
@@ -190,10 +191,10 @@ app.add_middleware(
 )
 
 
-@app.get("/")
-async def health_check():
-    # 提供基础健康检查接口，便于快速确认服务是否启动成功
-    return {"status": "ok"}
+# @app.get("")
+# # async def health_check():
+# #     # 提供基础健康检查接口，便于快速确认服务是否启动成功
+# #     return {"status": "ok"}
 
 
 @app.post("/api/redraw")
@@ -342,3 +343,8 @@ async def segment(payload: SegmentRequest):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"SAM 抠图失败: {str(exc)}") from exc
+
+
+
+
+app.mount("/", StaticFiles(directory="dist", html=True), name="static")
